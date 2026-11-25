@@ -1,0 +1,82 @@
+From e39b119b1024e7b202361d176e414136099c890e Mon Sep 17 00:00:00 2001
+From: aclater <105859+aclater@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 11:22:18 +0100
+Subject: [PATCH 0/3] DSF muxer and PCM to DSD encoding via libdsd_upsample
+
+This series fixes a channel layout in the DSF demuxer, and adds a DSF (DSD
+Stream File) muxer and an encoder wrapper for libdsd_upsample, a library
+that converts PCM to DSD64, DSD128 or DSD256 with a delta-sigma modulator
+(MIT OR Apache-2.0).
+
+1/3 DSF demuxer fix. The DSF specification defines channel type 5
+("4 channels") as front left, front right, center and low frequency (3.1);
+the demuxer read it as 4.0.
+
+2/3 DSF muxer. Accepts dsd_lsbf, dsd_msbf and their planar variants, 1 to 6
+channels. Writes 4096-byte blocks per channel, least significant bit first
+(bits per sample 1), zero-pads the last block and fixes up the sizes in the
+trailer. Global metadata and chapters go into an ID3v2 tag after the data.
+Channel types follow the demuxer's table, so files round-trip. The FATE tests
+use the generated asynth WAV as raw DSD data, so no new samples are needed.
+
+3/3 libdsdupsample encoder. Takes dblp at 44.1, 88.2, 176.4 or 352.8 kHz, or
+at 48, 96, 192 or 384 kHz (the library resamples these by 147/160 to the
+44.1 kHz family), and outputs dsd_msbf_planar. As for the other DSD codecs,
+the output sample rate is the DSD bit rate / 8, which differs from the input
+rate; the encoder sets avctx->sample_rate to the DSD rate in init, after the
+input rate has been validated, and timestamps stay in the caller's time
+base. I found no existing encoder that changes its rate. If an audio filter
+producing AV_SAMPLE_FMT_DSD, encoded by the existing dsd_msbf encoder, is
+preferred, I can rework it that way.
+
+Tested with fate-dsf and fate-source (static and shared builds), and by
+comparing the encoder's DSF output byte for byte with the library's own
+command-line converter of the same library version (DSD64/128/256, several
+orders, gains and channel counts, 44.1 to 352.8 and 48 to 384 kHz input,
+with -fflags +bitexact -map_metadata -1 so that no ID3v2 tag is written).
+The files are identical with two exceptions, both in the DSF header:
+- When the converted audio ends inside a byte (common with 48 kHz-family
+  input), the DSF header's sample count is rounded up to a whole byte,
+  because FFmpeg counts DSD in bytes; the audio data is identical to the
+  command-line tool's.
+- For 4-channel input with the 3.1 layout, the muxer writes channel type 5
+  (3.1, as patch 1 reads it) where the converter writes type 4 (quad).
+
+aclater (3):
+  avformat/dsfdec: fix the channel layout of channel type 5
+  avformat: add DSF muxer
+  avcodec: add PCM to DSD encoding via libdsd_upsample
+
+ Changelog                               |   2 +
+ configure                               |   4 +
+ doc/encoders.texi                       |  48 ++++
+ doc/general_contents.texi               |  13 +-
+ doc/muxers.texi                         |  36 +++
+ libavcodec/Makefile                     |   1 +
+ libavcodec/allcodecs.c                  |   1 +
+ libavcodec/libdsdupsample.c             | 264 +++++++++++++++++++
+ libavcodec/version.h                    |   2 +-
+ libavformat/Makefile                    |   2 +
+ libavformat/allformats.c                |   1 +
+ libavformat/dsfdec.c                    |   2 +-
+ libavformat/dsfenc.c                    | 320 ++++++++++++++++++++++++
+ libavformat/reverse.c                   |   1 +
+ libavformat/version.h                   |   2 +-
+ tests/Makefile                          |   1 +
+ tests/fate/dsf.mak                      |  27 ++
+ tests/ref/fate/dsf-3point1              |  59 +++++
+ tests/ref/fate/dsf-dsd-lsbf-planar-copy | 143 +++++++++++
+ tests/ref/fate/dsf-dsd-msbf             | 147 +++++++++++
+ tests/ref/fate/source                   |   1 +
+ 21 files changed, 1072 insertions(+), 5 deletions(-)
+ create mode 100644 libavcodec/libdsdupsample.c
+ create mode 100644 libavformat/dsfenc.c
+ create mode 100644 libavformat/reverse.c
+ create mode 100644 tests/fate/dsf.mak
+ create mode 100644 tests/ref/fate/dsf-3point1
+ create mode 100644 tests/ref/fate/dsf-dsd-lsbf-planar-copy
+ create mode 100644 tests/ref/fate/dsf-dsd-msbf
+
+-- 
+2.56.1
+

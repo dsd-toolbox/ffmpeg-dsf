@@ -1,0 +1,81 @@
+# Checks on every push and pull request: the patches apply with git am to FFmpeg at the
+# base commit, a minimal FFmpeg build with --enable-libdsdupsample passes fate-dsf and
+# fate-source, and test/compare.sh finds ffmpeg's DSF output byte-identical to the
+# dsd-upsample CLI's. Linux x86_64 only.
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+env:
+  RUST_STABLE: 1.100.0
+  FFMPEG_BASE: 05c674c9132eb13e65e3fb6e9b4cf1cad1219fd5
+  # The library is fetched by commit, never by tag, and the build stops unless
+  # `git rev-parse HEAD` equals this pin. It is set at release time to the public
+  # dsd-upsample-rs commit of the release this patch set is built against
+  # (docs/development.md, "Library pin").
+  DSD_UPSAMPLE_COMMIT: aa033c70097b67e4f09dbe30de66dbc6a4b26620
+# bash on every runner; steps that need pwsh say so.
+defaults:
+  run:
+    shell: bash
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          path: ffmpeg-dsf
+      # Same layout as the README Quick start: the checkouts side by side.
+      - name: Library sources (by commit, checked)
+        run: |
+          git init -q dsd-upsample-rs
+          git -C dsd-upsample-rs fetch -q --depth 1 https://github.com/dsd-toolbox/dsd-upsample-rs.git "$DSD_UPSAMPLE_COMMIT"
+          git -C dsd-upsample-rs checkout -q FETCH_HEAD
+          got=$(git -C dsd-upsample-rs rev-parse HEAD)
+          if [ "$got" != "$DSD_UPSAMPLE_COMMIT" ]; then
+            echo "::error::library is at $got, expected $DSD_UPSAMPLE_COMMIT"; exit 1
+          fi
+          echo "library at $got"
+      - run: rustup toolchain install "$RUST_STABLE" --profile minimal && rustup default "$RUST_STABLE"
+      - run: cargo build --locked --release -p dsd-upsample-capi -p dsd-upsample-cli --manifest-path dsd-upsample-rs/Cargo.toml
+      - name: FFmpeg at the base commit with the patches
+        run: |
+          git init -q ffmpeg
+          git -C ffmpeg fetch -q --depth 1 https://github.com/FFmpeg/FFmpeg.git "$FFMPEG_BASE"
+          git -C ffmpeg checkout -q FETCH_HEAD
+          git -C ffmpeg -c user.name=ci -c user.email=ci@invalid am ../ffmpeg-dsf/patches/0001-avformat-dsfdec-fix-the-channel-layout-of-channel-ty.patch ../ffmpeg-dsf/patches/0002-avformat-add-DSF-muxer.patch ../ffmpeg-dsf/patches/0003-avcodec-add-PCM-to-DSD-encoding-via-libdsd_upsample.patch
+          git -C ffmpeg log --oneline -3
+      - name: Configure (minimal build)
+        working-directory: ffmpeg
+        run: >-
+          PKG_CONFIG_PATH=../ffmpeg-dsf/pkgconfig ./configure
+          --disable-everything --disable-doc --disable-x86asm --enable-libdsdupsample
+          --enable-encoder=libdsdupsample,dsd_msbf,pcm_s16le,pcm_s24le,rawvideo
+          --enable-decoder=dsd_msbf,dsd_lsbf,dsd_msbf_planar,dsd_lsbf_planar,pcm_s16le,pcm_s24le,pcm_u8,pcm_f64le,rawvideo
+          --enable-muxer=dsf,framecrc,crc,wav,null
+          --enable-demuxer=dsf,iff,wav,pcm_u8
+          --enable-protocol=file,pipe --enable-indev=lavfi
+          --enable-filter=sine,aevalsrc,aresample,aformat,anull,abuffer,abuffersink,null,format,buffer,buffersink
+      - name: Build
+        working-directory: ffmpeg
+        run: make -j"$(nproc)"
+      - name: FATE
+        working-directory: ffmpeg
+        run: make -j"$(nproc)" fate-dsf fate-source
+      - name: Compare with the CLI
+        run: ffmpeg-dsf/test/compare.sh ffmpeg dsd-upsample-rs/target/release/dsd-upsample cmp
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: ffmpeg-dsf-ci-logs
+          path: |
+            ffmpeg/ffbuild/config.log
+            ffmpeg/tests/data/fate/*.err
+            cmp/*.log
+          if-no-files-found: ignore
+          retention-days: 7

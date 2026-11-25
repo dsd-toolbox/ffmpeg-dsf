@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# pkg-config file for libdsd_upsample built in a dsd-upsample-rs checkout that sits next to
+# this repository (cargo build --release -p dsd-upsample-capi). Paths are relative to this
+# file. Links the static library, so ffmpeg needs no library path at run time. Stop-gap
+# until the library installs its own dsd_upsample.pc.
+prefix=${pcfiledir}/../../dsd-upsample-rs
+libdir=${prefix}/target/release
+includedir=${prefix}/crates/dsd-upsample-capi/include
+
+Name: dsd_upsample
+Description: DSD upsampling library
+Version: 0.1.0
+Libs: -L${libdir} -l:libdsd_upsample.a -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
+Cflags: -I${includedir}

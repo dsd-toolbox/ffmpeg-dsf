@@ -1,0 +1,916 @@
+From cf18f68100b7b2c94874f9c7a99016acaf684b60 Mon Sep 17 00:00:00 2001
+From: aclater <105859+aclater@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 09:35:35 +0100
+Subject: [PATCH 2/3] avformat: add DSF muxer
+
+Writes DSD Stream File from the DSD codecs (dsd_lsbf, dsd_msbf and their
+planar variants), 1 to 6 channels. The audio is written least significant
+bit first in blocks of 4096 bytes per channel, the last block padded with
+zeros, as most DSF files are; most significant bit first input is
+bit-reversed. The file size, sample count and data size are written by the
+trailer. Global metadata and chapters go into an ID3v2 tag after the data.
+
+The channel type follows the layouts the DSF demuxer reads, so that files
+round-trip.
+
+Signed-off-by: aclater <105859+aclater@users.noreply.github.com>
+---
+ Changelog                               |   1 +
+ doc/general_contents.texi               |   2 +-
+ doc/muxers.texi                         |  36 +++
+ libavformat/Makefile                    |   2 +
+ libavformat/allformats.c                |   1 +
+ libavformat/dsfenc.c                    | 320 ++++++++++++++++++++++++
+ libavformat/reverse.c                   |   1 +
+ libavformat/version.h                   |   2 +-
+ tests/Makefile                          |   1 +
+ tests/fate/dsf.mak                      |  27 ++
+ tests/ref/fate/dsf-3point1              |  59 +++++
+ tests/ref/fate/dsf-dsd-lsbf-planar-copy | 143 +++++++++++
+ tests/ref/fate/dsf-dsd-msbf             | 147 +++++++++++
+ tests/ref/fate/source                   |   1 +
+ 14 files changed, 741 insertions(+), 2 deletions(-)
+ create mode 100644 libavformat/dsfenc.c
+ create mode 100644 libavformat/reverse.c
+ create mode 100644 tests/fate/dsf.mak
+ create mode 100644 tests/ref/fate/dsf-3point1
+ create mode 100644 tests/ref/fate/dsf-dsd-lsbf-planar-copy
+ create mode 100644 tests/ref/fate/dsf-dsd-msbf
+
+diff --git a/Changelog b/Changelog
+index 8731d00..dead2f1 100644
+--- a/Changelog
++++ b/Changelog
+@@ -9,6 +9,7 @@ version <next>:
+ - PCM PAMF decoder
+ - Super Audio CD (SACD) demuxer
+ - DSS variable rate SP (format 1) support
++- DSF muxer
+ 
+ version 9.1:
+ - ASTC image encoding and decoding via libastcenc, with .astc and KTX 1.0 muxers and demuxers
+diff --git a/doc/general_contents.texi b/doc/general_contents.texi
+index ffbe33b..ccd7c6d 100644
+--- a/doc/general_contents.texi
++++ b/doc/general_contents.texi
+@@ -596,7 +596,7 @@ library:
+ @item DFA                       @tab   @tab X
+     @tab This format is used in Chronomaster game
+ @item DirectDraw Surface        @tab   @tab X
+-@item DSD Stream File (DSF)     @tab   @tab X
++@item DSD Stream File (DSF)     @tab X @tab X
+ @item DV video                  @tab X @tab X
+ @item DXA                       @tab   @tab X
+     @tab This format is used in the non-Windows version of the Feeble Files
+diff --git a/doc/muxers.texi b/doc/muxers.texi
+index 4b41971..f9d1b8e 100644
+--- a/doc/muxers.texi
++++ b/doc/muxers.texi
+@@ -1461,6 +1461,42 @@ filter to limit the muxed packet size, because this format does not support
+ muxing packets larger than 65535 bytes (3640 samples). For newer ffmpeg
+ versions audio is automatically packetized to 36000 byte (2000 sample) packets.
+ 
++@anchor{dsf}
++@section dsf
++DSD Stream File (DSF) muxer.
++
++It accepts exactly one audio stream with one of the DSD codecs
++(@samp{dsd_lsbf}, @samp{dsd_msbf}, @samp{dsd_lsbf_planar} or
++@samp{dsd_msbf_planar}) and 1 to 6 channels. The audio data is always
++written least significant bit first, in blocks of 4096 bytes per channel;
++the last block of each channel is padded with zeros. The file and data
++sizes are written at the end, so the output should be seekable.
++
++The sample count in the header is 8 times the number of bytes per channel.
++The DSF demuxer drops a partial last byte, so a stream copy of a DSF file
++whose sample count is not a multiple of 8 loses its last 1 to 7 samples.
++
++The channel type is set from the channel layout (mono, stereo, 3.0, quad,
++3.1, 5.0 or 5.1); other layouts get the default type for their channel
++count.
++
++@subsection Options
++@table @option
++@item write_id3v2 @var{bool}
++Write the global metadata and chapters as an ID3v2 tag after the audio
++data. Enabled by default; no tag is written if there is no metadata.
++
++@item id3v2_version @var{integer}
++Select the ID3v2 version to write, 3 or 4 (ID3v2.3 or ID3v2.4). The
++default is 4.
++@end table
++
++@subsection Example
++Copy the DSD audio of a DFF file into a DSF file:
++@example
++ffmpeg -i INPUT.dff -c:a copy OUTPUT.dsf
++@end example
++
+ @section dv
+ DV (Digital Video) muxer.
+ 
+diff --git a/libavformat/Makefile b/libavformat/Makefile
+index 93664e4..fd5894b 100644
+--- a/libavformat/Makefile
++++ b/libavformat/Makefile
+@@ -206,6 +206,7 @@ OBJS-$(CONFIG_DIRAC_MUXER)               += rawenc.o
+ OBJS-$(CONFIG_DNXHD_DEMUXER)             += dnxhddec.o rawdec.o
+ OBJS-$(CONFIG_DNXHD_MUXER)               += rawenc.o
+ OBJS-$(CONFIG_DSF_DEMUXER)               += dsfdec.o
++OBJS-$(CONFIG_DSF_MUXER)                 += dsfenc.o id3v2/writer.o
+ OBJS-$(CONFIG_DSICIN_DEMUXER)            += dsicin.o
+ OBJS-$(CONFIG_DSS_DEMUXER)               += dss.o
+ OBJS-$(CONFIG_DTSHD_DEMUXER)             += dtshddec.o
+@@ -751,6 +752,7 @@ SHLIBOBJS                                += log2_tab.o to_upper4.o \
+                                             golomb_tab.o h2645_parse.o \
+                                             lcevctab.o
+ SHLIBOBJS-$(CONFIG_ISO_MEDIA)            += mpegaudiotabs.o
++SHLIBOBJS-$(CONFIG_DSF_MUXER)            += reverse.o
+ SHLIBOBJS-$(CONFIG_FLV_MUXER)            += mpeg4audio_sample_rates.o
+ SHLIBOBJS-$(CONFIG_HLS_DEMUXER)          += ac3_channel_layout_tab.o
+ SHLIBOBJS-$(CONFIG_IMAGE_JPEGXL_PIPE_DEMUXER)    += jpegxl_parse.o
+diff --git a/libavformat/allformats.c b/libavformat/allformats.c
+index db5656c..98c844a 100644
+--- a/libavformat/allformats.c
++++ b/libavformat/allformats.c
+@@ -146,6 +146,7 @@ extern const FFOutputFormat ff_dirac_muxer;
+ extern const FFInputFormat  ff_dnxhd_demuxer;
+ extern const FFOutputFormat ff_dnxhd_muxer;
+ extern const FFInputFormat  ff_dsf_demuxer;
++extern const FFOutputFormat ff_dsf_muxer;
+ extern const FFInputFormat  ff_dsicin_demuxer;
+ extern const FFInputFormat  ff_dss_demuxer;
+ extern const FFInputFormat  ff_dts_demuxer;
+diff --git a/libavformat/dsfenc.c b/libavformat/dsfenc.c
+new file mode 100644
+index 0000000..230b265
+--- /dev/null
++++ b/libavformat/dsfenc.c
+@@ -0,0 +1,320 @@
++/*
++ * DSD Stream File (DSF) muxer
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/**
++ * @file
++ * DSD Stream File (DSF) muxer
++ *
++ * The audio data is written as one 4096-byte block per channel in turn,
++ * least significant bit first (bits per sample 1); the last block of each
++ * channel is padded with zeros. The sizes in the header are filled in by
++ * the trailer. Global metadata and chapters are written as an ID3v2 tag
++ * after the data.
++ */
++
++#include <string.h>
++
++#include "libavutil/channel_layout.h"
++#include "libavutil/dict.h"
++#include "libavutil/mem.h"
++#include "libavutil/opt.h"
++#include "libavutil/reverse.h"
++#include "avformat.h"
++#include "avio_internal.h"
++#include "id3v2.h"
++#include "internal.h"
++#include "mux.h"
++
++#define DSF_BLOCK_SIZE      4096
++#define DSF_MAX_CHANNELS    6
++#define DSF_HEADER_SIZE     (28 + 52 + 12)
++#define DSF_FILE_SIZE_POS   12
++#define DSF_SAMPLE_COUNT_POS 64
++#define DSF_DATA_SIZE_POS   84
++
++typedef struct DSFMuxContext {
++    const AVClass *class;
++    int write_id3v2;
++    int id3v2_version;
++    int planar;
++    int msbf;
++    int channels;
++    int fill;               ///< bytes buffered per channel
++    uint64_t nb_bytes;      ///< bytes written per channel, without padding
++    uint64_t nb_blocks;     ///< blocks written per channel
++    uint8_t *block;         ///< one block per channel
++} DSFMuxContext;
++
++/** Channel layouts indexed by channel type, as read by the DSF demuxer. */
++static const AVChannelLayout dsf_channel_layout[] = {
++    { 0 },
++    AV_CHANNEL_LAYOUT_MONO,
++    AV_CHANNEL_LAYOUT_STEREO,
++    AV_CHANNEL_LAYOUT_SURROUND,
++    AV_CHANNEL_LAYOUT_QUAD,
++    AV_CHANNEL_LAYOUT_3POINT1,
++    AV_CHANNEL_LAYOUT_5POINT0_BACK,
++    AV_CHANNEL_LAYOUT_5POINT1_BACK,
++};
++
++/** Channel type for a channel count without a known layout. */
++static const uint8_t dsf_default_channel_type[DSF_MAX_CHANNELS + 1] = {
++    0, 1, 2, 3, 4, 6, 7,
++};
++
++static int dsf_channel_type(AVFormatContext *s, const AVChannelLayout *layout)
++{
++    for (int i = 1; i < FF_ARRAY_ELEMS(dsf_channel_layout); i++)
++        if (!av_channel_layout_compare(layout, &dsf_channel_layout[i]))
++            return i;
++
++    if (layout->order != AV_CHANNEL_ORDER_UNSPEC)
++        av_log(s, AV_LOG_WARNING, "Channel layout not supported by DSF, "
++               "writing the default layout for %d channels\n",
++               layout->nb_channels);
++    return dsf_default_channel_type[layout->nb_channels];
++}
++
++static av_cold int dsf_init(AVFormatContext *s)
++{
++    DSFMuxContext *dsf = s->priv_data;
++    AVCodecParameters *par;
++
++    if (s->nb_streams != 1) {
++        av_log(s, AV_LOG_ERROR, "DSF files have exactly one audio stream\n");
++        return AVERROR(EINVAL);
++    }
++    par = s->streams[0]->codecpar;
++
++    switch (par->codec_id) {
++    case AV_CODEC_ID_DSD_LSBF:                    break;
++    case AV_CODEC_ID_DSD_MSBF:        dsf->msbf = 1; break;
++    case AV_CODEC_ID_DSD_LSBF_PLANAR: dsf->planar = 1; break;
++    case AV_CODEC_ID_DSD_MSBF_PLANAR: dsf->planar = dsf->msbf = 1; break;
++    default:
++        av_log(s, AV_LOG_ERROR, "Only DSD codecs are supported in DSF\n");
++        return AVERROR(EINVAL);
++    }
++
++    dsf->channels = par->ch_layout.nb_channels;
++    if (dsf->channels < 1 || dsf->channels > DSF_MAX_CHANNELS) {
++        av_log(s, AV_LOG_ERROR, "DSF supports 1 to %d channels, not %d\n",
++               DSF_MAX_CHANNELS, dsf->channels);
++        return AVERROR(EINVAL);
++    }
++    if (par->sample_rate <= 0 || par->sample_rate > UINT32_MAX / 8) {
++        av_log(s, AV_LOG_ERROR, "Invalid sample rate %d\n", par->sample_rate);
++        return AVERROR(EINVAL);
++    }
++
++    dsf->block = av_malloc(DSF_BLOCK_SIZE * dsf->channels);
++    if (!dsf->block)
++        return AVERROR(ENOMEM);
++
++    avpriv_set_pts_info(s->streams[0], 64, 1, par->sample_rate);
++
++    return 0;
++}
++
++static int dsf_write_header(AVFormatContext *s)
++{
++    DSFMuxContext *dsf = s->priv_data;
++    AVCodecParameters *par = s->streams[0]->codecpar;
++    AVIOContext *pb = s->pb;
++
++    if (!(pb->seekable & AVIO_SEEKABLE_NORMAL))
++        av_log(s, AV_LOG_WARNING, "Output is not seekable, "
++               "the header will not have the file and data sizes\n");
++
++    /* DSD chunk; file size and metadata offset are written by the trailer */
++    ffio_wfourcc(pb, "DSD ");
++    avio_wl64(pb, 28);
++    avio_wl64(pb, 0);
++    avio_wl64(pb, 0);
++
++    /* fmt chunk */
++    ffio_wfourcc(pb, "fmt ");
++    avio_wl64(pb, 52);
++    avio_wl32(pb, 1);                       /* format version */
++    avio_wl32(pb, 0);                       /* format id: raw */
++    avio_wl32(pb, dsf_channel_type(s, &par->ch_layout));
++    avio_wl32(pb, dsf->channels);
++    avio_wl32(pb, par->sample_rate * 8U);
++    avio_wl32(pb, 1);                       /* bits per sample: LSB first */
++    avio_wl64(pb, 0);                       /* sample count */
++    avio_wl32(pb, DSF_BLOCK_SIZE);
++    avio_wl32(pb, 0);                       /* reserved */
++
++    /* data chunk */
++    ffio_wfourcc(pb, "data");
++    avio_wl64(pb, 12);
++
++    return 0;
++}
++
++static void dsf_write_block(AVFormatContext *s)
++{
++    DSFMuxContext *dsf = s->priv_data;
++
++    for (int ch = 0; ch < dsf->channels; ch++)
++        memset(dsf->block + ch * DSF_BLOCK_SIZE + dsf->fill, 0,
++               DSF_BLOCK_SIZE - dsf->fill);
++    avio_write(s->pb, dsf->block, DSF_BLOCK_SIZE * dsf->channels);
++    dsf->nb_blocks++;
++    dsf->fill = 0;
++}
++
++static int dsf_write_packet(AVFormatContext *s, AVPacket *pkt)
++{
++    DSFMuxContext *dsf = s->priv_data;
++    const int channels = dsf->channels;
++    int nb_samples, pos = 0;
++
++    if (pkt->size % channels) {
++        av_log(s, AV_LOG_ERROR, "Packet size %d is not a multiple of "
++               "the channel count %d\n", pkt->size, channels);
++        return AVERROR(EINVAL);
++    }
++    nb_samples = pkt->size / channels;
++
++    while (pos < nb_samples) {
++        int n = FFMIN(nb_samples - pos, DSF_BLOCK_SIZE - dsf->fill);
++
++        for (int ch = 0; ch < channels; ch++) {
++            uint8_t *dst = dsf->block + ch * DSF_BLOCK_SIZE + dsf->fill;
++            const uint8_t *src;
++            int stride;
++
++            if (dsf->planar) {
++                src    = pkt->data + ch * nb_samples + pos;
++                stride = 1;
++            } else {
++                src    = pkt->data + pos * channels + ch;
++                stride = channels;
++            }
++
++            if (dsf->msbf) {
++                for (int i = 0; i < n; i++)
++                    dst[i] = ff_reverse[src[i * stride]];
++            } else if (stride == 1) {
++                memcpy(dst, src, n);
++            } else {
++                for (int i = 0; i < n; i++)
++                    dst[i] = src[i * stride];
++            }
++        }
++
++        dsf->fill += n;
++        pos       += n;
++        if (dsf->fill == DSF_BLOCK_SIZE)
++            dsf_write_block(s);
++    }
++    dsf->nb_bytes += nb_samples;
++
++    return 0;
++}
++
++static int dsf_write_trailer(AVFormatContext *s)
++{
++    DSFMuxContext *dsf = s->priv_data;
++    AVIOContext *pb = s->pb;
++    uint64_t data_size, id3_pos = 0;
++    int64_t file_size, end, pos;
++    int id3_ret = 0;
++
++    if (dsf->fill)
++        dsf_write_block(s);
++    data_size = dsf->nb_blocks * DSF_BLOCK_SIZE * dsf->channels;
++
++    if (dsf->write_id3v2 && (av_dict_count(s->metadata) || s->nb_chapters)) {
++        id3_pos = avio_tell(pb);
++        id3_ret = ff_id3v2_write_simple(s, dsf->id3v2_version, ID3v2_DEFAULT_MAGIC);
++    }
++
++    if (!(pb->seekable & AVIO_SEEKABLE_NORMAL))
++        return id3_ret;
++
++    end = file_size = avio_tell(pb);
++    if (file_size < 0)
++        return file_size;
++    /* A failed tag still gets a valid header for the audio: the file ends
++     * where the tag would have started, and there is no metadata pointer. */
++    if (id3_ret < 0) {
++        file_size = id3_pos;
++        id3_pos   = 0;
++    }
++
++    if ((pos = avio_seek(pb, DSF_FILE_SIZE_POS, SEEK_SET)) < 0)
++        return pos;
++    avio_wl64(pb, file_size);
++    avio_wl64(pb, id3_pos);
++    if ((pos = avio_seek(pb, DSF_SAMPLE_COUNT_POS, SEEK_SET)) < 0)
++        return pos;
++    avio_wl64(pb, dsf->nb_bytes * 8);
++    if ((pos = avio_seek(pb, DSF_DATA_SIZE_POS, SEEK_SET)) < 0)
++        return pos;
++    avio_wl64(pb, 12 + data_size);
++    if ((pos = avio_seek(pb, end, SEEK_SET)) < 0)
++        return pos;
++
++    return id3_ret;
++}
++
++static av_cold void dsf_deinit(AVFormatContext *s)
++{
++    DSFMuxContext *dsf = s->priv_data;
++
++    av_freep(&dsf->block);
++}
++
++#define OFFSET(x) offsetof(DSFMuxContext, x)
++#define ENC AV_OPT_FLAG_ENCODING_PARAM
++static const AVOption options[] = {
++    { "write_id3v2", "Write the global metadata as an ID3v2 tag",
++      OFFSET(write_id3v2), AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, ENC },
++    { "id3v2_version", "ID3v2 version to write (3 or 4)",
++      OFFSET(id3v2_version), AV_OPT_TYPE_INT, { .i64 = 4 }, 3, 4, ENC },
++    { NULL },
++};
++
++static const AVClass dsf_muxer_class = {
++    .class_name = "DSF muxer",
++    .item_name  = av_default_item_name,
++    .option     = options,
++    .version    = LIBAVUTIL_VERSION_INT,
++};
++
++const FFOutputFormat ff_dsf_muxer = {
++    .p.name           = "dsf",
++    .p.long_name      = NULL_IF_CONFIG_SMALL("DSD Stream File (DSF)"),
++    .p.extensions     = "dsf",
++    .p.audio_codec    = AV_CODEC_ID_DSD_MSBF,
++    .p.video_codec    = AV_CODEC_ID_NONE,
++    .p.subtitle_codec = AV_CODEC_ID_NONE,
++    .p.flags          = AVFMT_NOTIMESTAMPS,
++    .p.priv_class     = &dsf_muxer_class,
++    .priv_data_size   = sizeof(DSFMuxContext),
++    .flags_internal   = FF_OFMT_FLAG_MAX_ONE_OF_EACH,
++    .init             = dsf_init,
++    .write_header     = dsf_write_header,
++    .write_packet     = dsf_write_packet,
++    .write_trailer    = dsf_write_trailer,
++    .deinit           = dsf_deinit,
++};
+diff --git a/libavformat/reverse.c b/libavformat/reverse.c
+new file mode 100644
+index 0000000..440bada
+--- /dev/null
++++ b/libavformat/reverse.c
+@@ -0,0 +1 @@
++#include "libavutil/reverse.c"
+diff --git a/libavformat/version.h b/libavformat/version.h
+index 683184d..d8fc959 100644
+--- a/libavformat/version.h
++++ b/libavformat/version.h
+@@ -31,7 +31,7 @@
+ 
+ #include "version_major.h"
+ 
+-#define LIBAVFORMAT_VERSION_MINOR  21
++#define LIBAVFORMAT_VERSION_MINOR  22
+ #define LIBAVFORMAT_VERSION_MICRO 100
+ 
+ #define LIBAVFORMAT_VERSION_INT AV_VERSION_INT(LIBAVFORMAT_VERSION_MAJOR, \
+diff --git a/tests/Makefile b/tests/Makefile
+index 2fb8a36..fbd8519 100644
+--- a/tests/Makefile
++++ b/tests/Makefile
+@@ -203,6 +203,7 @@ include $(SRC_PATH)/tests/fate/demux.mak
+ include $(SRC_PATH)/tests/fate/dfa.mak
+ include $(SRC_PATH)/tests/fate/dnxhd.mak
+ include $(SRC_PATH)/tests/fate/dpcm.mak
++include $(SRC_PATH)/tests/fate/dsf.mak
+ include $(SRC_PATH)/tests/fate/dvvideo.mak
+ include $(SRC_PATH)/tests/fate/ea.mak
+ include $(SRC_PATH)/tests/fate/exif.mak
+diff --git a/tests/fate/dsf.mak b/tests/fate/dsf.mak
+new file mode 100644
+index 0000000..b8c4506
+--- /dev/null
++++ b/tests/fate/dsf.mak
+@@ -0,0 +1,27 @@
++# The generated WAV file is used as arbitrary DSD data (raw, 2 channels).
++DSF_RAW_INPUT = -ac 2 -ar 352800 -request_sample_fmt dsd
++
++# interleaved, most significant bit first: dsd_msbf encoder, bits reversed by the muxer
++FATE_DSF_FFMPEG_FFPROBE-$(call TRANSCODE, DSD_MSBF, DSF, PCM_U8_DEMUXER DSD_LSBF_PLANAR_DECODER) += fate-dsf-dsd-msbf
++fate-dsf-dsd-msbf: tests/data/asynth-44100-2.wav
++fate-dsf-dsd-msbf: CMD = transcode u8 $(TARGET_PATH)/tests/data/asynth-44100-2.wav dsf \
++    "-c:a dsd_msbf -metadata title=dsftest" "-c:a dsd_msbf" \
++    "-show_entries stream=codec_name,sample_rate,channels,channel_layout,duration:format_tags" \
++    "" "-request_sample_fmt dsd" "$(DSF_RAW_INPUT) -c:a dsd_msbf"
++
++# planar, least significant bit first: stream copy, blocks of the input packet size
++FATE_DSF_FFMPEG_FFPROBE-$(call REMUX, DSF, PCM_U8_DEMUXER DSD_LSBF_PLANAR_DECODER) += fate-dsf-dsd-lsbf-planar-copy
++fate-dsf-dsd-lsbf-planar-copy: tests/data/asynth-44100-2.wav
++fate-dsf-dsd-lsbf-planar-copy: CMD = transcode u8 $(TARGET_PATH)/tests/data/asynth-44100-2.wav dsf \
++    "-c:a copy" "-c:a copy" "-show_entries stream=codec_name,sample_rate,channels,duration" \
++    "" "" "$(DSF_RAW_INPUT) -c:a dsd_lsbf_planar"
++
++# channel type 5 (3.1) round-trips through the muxer and the demuxer
++FATE_DSF_FFMPEG_FFPROBE-$(call REMUX, DSF, PCM_U8_DEMUXER DSD_LSBF_PLANAR_DECODER) += fate-dsf-3point1
++fate-dsf-3point1: tests/data/asynth-44100-2.wav
++fate-dsf-3point1: CMD = transcode u8 $(TARGET_PATH)/tests/data/asynth-44100-2.wav dsf \
++    "-c:a copy" "-c:a copy" "-show_entries stream=channels,channel_layout" \
++    "" "" "-ch_layout 3.1 -ar 352800 -t 0.5 -c:a dsd_lsbf_planar"
++
++FATE_FFMPEG_FFPROBE += $(FATE_DSF_FFMPEG_FFPROBE-yes)
++fate-dsf: $(FATE_DSF_FFMPEG_FFPROBE-yes)
+diff --git a/tests/ref/fate/dsf-3point1 b/tests/ref/fate/dsf-3point1
+new file mode 100644
+index 0000000..aa905d4
+--- /dev/null
++++ b/tests/ref/fate/dsf-3point1
+@@ -0,0 +1,59 @@
++fb2435d94057a2a9f4e1aaf74266e67a *tests/data/fate/dsf-3point1.dsf
++786524 tests/data/fate/dsf-3point1.dsf
++#tb 0: 1/352800
++#media_type 0: audio
++#codec_id 0: dsd_lsbf_planar
++#sample_rate 0: 352800
++#channel_layout_name 0: 3.1
++0,          0,          0,     4096,    16384, 0x2680d86c
++0,       4096,       4096,     4096,    16384, 0x8ecce1d9
++0,       8192,       8192,     4096,    16384, 0x2982e1dd
++0,      12288,      12288,     4096,    16384, 0xed68e1d7
++0,      16384,      16384,     4096,    16384, 0xe50ae1d7
++0,      20480,      20480,     4096,    16384, 0x3b24e1dd
++0,      24576,      24576,     4096,    16384, 0x3de6e1d9
++0,      28672,      28672,     4096,    16384, 0xf055e1d9
++0,      32768,      32768,     4096,    16384, 0x28bb155a
++0,      36864,      36864,     4096,    16384, 0xbd3a168a
++0,      40960,      40960,     4096,    16384, 0x4c3fd737
++0,      45056,      45056,     4096,    16384, 0xaaa0b299
++0,      49152,      49152,     4096,    16384, 0x7a9db310
++0,      53248,      53248,     4096,    16384, 0x6e60f027
++0,      57344,      57344,     4096,    16384, 0x8ff4ec80
++0,      61440,      61440,     4096,    16384, 0xc5cdce0a
++0,      65536,      65536,     4096,    16384, 0x20a2b688
++0,      69632,      69632,     4096,    16384, 0xff01d63b
++0,      73728,      73728,     4096,    16384, 0xa0819d8f
++0,      77824,      77824,     4096,    16384, 0xa323bedb
++0,      81920,      81920,     4096,    16384, 0x7a3ab867
++0,      86016,      86016,     4096,    16384, 0x6cdeb203
++0,      90112,      90112,     4096,    16384, 0x7d6b75e2
++0,      94208,      94208,     4096,    16384, 0x8751d53a
++0,      98304,      98304,     4096,    16384, 0xc5ebe3c1
++0,     102400,     102400,     4096,    16384, 0x27337742
++0,     106496,     106496,     4096,    16384, 0xd80d7886
++0,     110592,     110592,     4096,    16384, 0xc5223844
++0,     114688,     114688,     4096,    16384, 0x34eacab9
++0,     118784,     118784,     4096,    16384, 0x59acce9e
++0,     122880,     122880,     4096,    16384, 0xe32fbed1
++0,     126976,     126976,     4096,    16384, 0x6626e7b7
++0,     131072,     131072,     4096,    16384, 0x87e0bd2b
++0,     135168,     135168,     4096,    16384, 0x864fbd89
++0,     139264,     139264,     4096,    16384, 0x78f1ca2f
++0,     143360,     143360,     4096,    16384, 0xcf3bc8d6
++0,     147456,     147456,     4096,    16384, 0x0783b57b
++0,     151552,     151552,     4096,    16384, 0xe51d175b
++0,     155648,     155648,     4096,    16384, 0xc759200b
++0,     159744,     159744,     4096,    16384, 0x2a84f9bf
++0,     163840,     163840,     4096,    16384, 0x98a3c889
++0,     167936,     167936,     4096,    16384, 0x055de03e
++0,     172032,     172032,     4096,    16384, 0xa94b05f6
++0,     176128,     176128,     4096,    16384, 0xa2ccbf95
++0,     180224,     180224,     4096,    16384, 0x36d58942
++0,     184320,     184320,     4096,    16384, 0x4ebfe61a
++0,     188416,     188416,     4096,    16384, 0x26d6e91f
++0,     192512,     192512,     4096,    16384, 0x897cc874
++[STREAM]
++channels=4
++channel_layout=3.1
++[/STREAM]
+diff --git a/tests/ref/fate/dsf-dsd-lsbf-planar-copy b/tests/ref/fate/dsf-dsd-lsbf-planar-copy
+new file mode 100644
+index 0000000..330e84a
+--- /dev/null
++++ b/tests/ref/fate/dsf-dsd-lsbf-planar-copy
+@@ -0,0 +1,143 @@
++ff9faed7f22d5625dd961f71551edd09 *tests/data/fate/dsf-dsd-lsbf-planar-copy.dsf
++1065052 tests/data/fate/dsf-dsd-lsbf-planar-copy.dsf
++#tb 0: 1/352800
++#media_type 0: audio
++#codec_id 0: dsd_lsbf_planar
++#sample_rate 0: 352800
++#channel_layout_name 0: stereo
++0,          0,          0,     4096,     8192, 0x4244eacf
++0,       4096,       4096,     4096,     8192, 0x6ba4fbe3
++0,       8192,       8192,     4096,     8192, 0xcd1ddb90
++0,      12288,      12288,     4096,     8192, 0x92c9f477
++0,      16384,      16384,     4096,     8192, 0x1e140076
++0,      20480,      20480,     4096,     8192, 0x81f5020d
++0,      24576,      24576,     4096,     8192, 0x56dbc314
++0,      28672,      28672,     4096,     8192, 0x5171f01d
++0,      32768,      32768,     4096,     8192, 0x4bd8ed8e
++0,      36864,      36864,     4096,     8192, 0xeab7e5e7
++0,      40960,      40960,     4096,     8192, 0xc08a064d
++0,      45056,      45056,     4096,     8192, 0xb020ed51
++0,      49152,      49152,     4096,     8192, 0x0624e161
++0,      53248,      53248,     4096,     8192, 0x1551dfd0
++0,      57344,      57344,     4096,     8192, 0xf9201ec5
++0,      61440,      61440,     4096,     8192, 0x3c99f1ad
++0,      65536,      65536,     4096,     8192, 0x05c5f042
++0,      69632,      69632,     4096,     8192, 0x6ba4fbe3
++0,      73728,      73728,     4096,     8192, 0xcd1ddb90
++0,      77824,      77824,     4096,     8192, 0x1c38cb4e
++0,      81920,      81920,     4096,     8192, 0x9415e6b8
++0,      86016,      86016,     4096,     8192, 0xf431045a
++0,      90112,      90112,     4096,     8192, 0x397cd9e0
++0,      94208,      94208,     4096,     8192, 0x599af7e2
++0,      98304,      98304,     4096,     8192, 0x20602509
++0,     102400,     102400,     4096,     8192, 0x19341a98
++0,     106496,     106496,     4096,     8192, 0xe347fb98
++0,     110592,     110592,     4096,     8192, 0x5123e73c
++0,     114688,     114688,     4096,     8192, 0x35d1cc49
++0,     118784,     118784,     4096,     8192, 0x31fbebcd
++0,     122880,     122880,     4096,     8192, 0xbdd612a0
++0,     126976,     126976,     4096,     8192, 0x5b51d619
++0,     131072,     131072,     4096,     8192, 0x7715ddbd
++0,     135168,     135168,     4096,     8192, 0x01bffb5c
++0,     139264,     139264,     4096,     8192, 0x3a2bff79
++0,     143360,     143360,     4096,     8192, 0x80081532
++0,     147456,     147456,     4096,     8192, 0xa645fda3
++0,     151552,     151552,     4096,     8192, 0xf61bedb8
++0,     155648,     155648,     4096,     8192, 0xf95ae4c6
++0,     159744,     159744,     4096,     8192, 0xb8030307
++0,     163840,     163840,     4096,     8192, 0x69a7d8bc
++0,     167936,     167936,     4096,     8192, 0xa5dfdad0
++0,     172032,     172032,     4096,     8192, 0x67379e07
++0,     176128,     176128,     4096,     8192, 0xbb52a9a9
++0,     180224,     180224,     4096,     8192, 0x983cbab5
++0,     184320,     184320,     4096,     8192, 0xb8ddc43c
++0,     188416,     188416,     4096,     8192, 0x16fc910d
++0,     192512,     192512,     4096,     8192, 0xe990d233
++0,     196608,     196608,     4096,     8192, 0x66071162
++0,     200704,     200704,     4096,     8192, 0x849997f1
++0,     204800,     204800,     4096,     8192, 0x14f3be00
++0,     208896,     208896,     4096,     8192, 0x76aa95e6
++0,     212992,     212992,     4096,     8192, 0xaa99cc37
++0,     217088,     217088,     4096,     8192, 0x4370bfbe
++0,     221184,     221184,     4096,     8192, 0x1801a257
++0,     225280,     225280,     4096,     8192, 0x8b71dbe5
++0,     229376,     229376,     4096,     8192, 0xff41d25f
++0,     233472,     233472,     4096,     8192, 0x659adf42
++0,     237568,     237568,     4096,     8192, 0x5ecbba77
++0,     241664,     241664,     4096,     8192, 0x7556a24f
++0,     245760,     245760,     4096,     8192, 0x2b4afe73
++0,     249856,     249856,     4096,     8192, 0xee960ee0
++0,     253952,     253952,     4096,     8192, 0xbaba1c7a
++0,     258048,     258048,     4096,     8192, 0x9e440bd2
++0,     262144,     262144,     4096,     8192, 0x3517e5a3
++0,     266240,     266240,     4096,     8192, 0x5a82df17
++0,     270336,     270336,     4096,     8192, 0xeac8e7ae
++0,     274432,     274432,     4096,     8192, 0x9adfe539
++0,     278528,     278528,     4096,     8192, 0x4cdfcdca
++0,     282624,     282624,     4096,     8192, 0xb54206fb
++0,     286720,     286720,     4096,     8192, 0x9ca41513
++0,     290816,     290816,     4096,     8192, 0x7648077c
++0,     294912,     294912,     4096,     8192, 0x441fd779
++0,     299008,     299008,     4096,     8192, 0xa962de63
++0,     303104,     303104,     4096,     8192, 0x1ba1e272
++0,     307200,     307200,     4096,     8192, 0x6675e38e
++0,     311296,     311296,     4096,     8192, 0xf8a0e7a2
++0,     315392,     315392,     4096,     8192, 0xc2bb1060
++0,     319488,     319488,     4096,     8192, 0xa3280af8
++0,     323584,     323584,     4096,     8192, 0x262cf243
++0,     327680,     327680,     4096,     8192, 0xc0f8c5e9
++0,     331776,     331776,     4096,     8192, 0xcb28fba8
++0,     335872,     335872,     4096,     8192, 0x43b5018d
++0,     339968,     339968,     4096,     8192, 0x02b1e149
++0,     344064,     344064,     4096,     8192, 0xc9fa14af
++0,     348160,     348160,     4096,     8192, 0xaf02d89d
++0,     352256,     352256,     4096,     8192, 0x279de037
++0,     356352,     356352,     4096,     8192, 0xe360e2af
++0,     360448,     360448,     4096,     8192, 0x447a02a0
++0,     364544,     364544,     4096,     8192, 0x622de487
++0,     368640,     368640,     4096,     8192, 0xc2a80469
++0,     372736,     372736,     4096,     8192, 0xd996de3d
++0,     376832,     376832,     4096,     8192, 0x66027493
++0,     380928,     380928,     4096,     8192, 0x69730d7d
++0,     385024,     385024,     4096,     8192, 0x7ab208e8
++0,     389120,     389120,     4096,     8192, 0x1cf4e5b6
++0,     393216,     393216,     4096,     8192, 0x0b04df39
++0,     397312,     397312,     4096,     8192, 0x0b89fd44
++0,     401408,     401408,     4096,     8192, 0x9397dd70
++0,     405504,     405504,     4096,     8192, 0xa32f039d
++0,     409600,     409600,     4096,     8192, 0xd9868223
++0,     413696,     413696,     4096,     8192, 0x00bbd45d
++0,     417792,     417792,     4096,     8192, 0xc925d8f1
++0,     421888,     421888,     4096,     8192, 0x622afc16
++0,     425984,     425984,     4096,     8192, 0x447a02a0
++0,     430080,     430080,     4096,     8192, 0x622de487
++0,     434176,     434176,     4096,     8192, 0xc2a80469
++0,     438272,     438272,     4096,     8192, 0xd996de3d
++0,     442368,     442368,     4096,     8192, 0x66027493
++0,     446464,     446464,     4096,     8192, 0x69730d7d
++0,     450560,     450560,     4096,     8192, 0x7ab208e8
++0,     454656,     454656,     4096,     8192, 0x1cf4e5b6
++0,     458752,     458752,     4096,     8192, 0x0b04df39
++0,     462848,     462848,     4096,     8192, 0x0b89fd44
++0,     466944,     466944,     4096,     8192, 0x9397dd70
++0,     471040,     471040,     4096,     8192, 0xa32f039d
++0,     475136,     475136,     4096,     8192, 0xd9868223
++0,     479232,     479232,     4096,     8192, 0x00bbd45d
++0,     483328,     483328,     4096,     8192, 0xc925d8f1
++0,     487424,     487424,     4096,     8192, 0x622afc16
++0,     491520,     491520,     4096,     8192, 0x447a02a0
++0,     495616,     495616,     4096,     8192, 0x622de487
++0,     499712,     499712,     4096,     8192, 0xc2a80469
++0,     503808,     503808,     4096,     8192, 0xd996de3d
++0,     507904,     507904,     4096,     8192, 0x66027493
++0,     512000,     512000,     4096,     8192, 0x69730d7d
++0,     516096,     516096,     4096,     8192, 0x7ab208e8
++0,     520192,     520192,     4096,     8192, 0x1cf4e5b6
++0,     524288,     524288,     4096,     8192, 0x3a19fed8
++0,     528384,     528384,      839,     1678, 0x043c535b
++[STREAM]
++codec_name=dsd_lsbf_planar
++sample_rate=352800
++channels=2
++duration=1.509297
++[/STREAM]
+diff --git a/tests/ref/fate/dsf-dsd-msbf b/tests/ref/fate/dsf-dsd-msbf
+new file mode 100644
+index 0000000..9792490
+--- /dev/null
++++ b/tests/ref/fate/dsf-dsd-msbf
+@@ -0,0 +1,147 @@
++4b67f9f7fa99523ad50d9a70a6d03e3f *tests/data/fate/dsf-dsd-msbf.dsf
++1065091 tests/data/fate/dsf-dsd-msbf.dsf
++#tb 0: 1/352800
++#media_type 0: audio
++#codec_id 0: dsd_msbf
++#sample_rate 0: 352800
++#channel_layout_name 0: stereo
++0,          0,          0,     4096,     8192, 0x527ee73b
++0,       4096,       4096,     4096,     8192, 0xbc96edfe
++0,       8192,       8192,     4096,     8192, 0xcf23f80b
++0,      12288,      12288,     4096,     8192, 0x460de1c8
++0,      16384,      16384,     4096,     8192, 0x9ec1ff77
++0,      20480,      20480,     4096,     8192, 0xb207e209
++0,      24576,      24576,     4096,     8192, 0x98b10a69
++0,      28672,      28672,     4096,     8192, 0x057ad169
++0,      32768,      32768,     4096,     8192, 0x43f3f51c
++0,      36864,      36864,     4096,     8192, 0xbedff3ce
++0,      40960,      40960,     4096,     8192, 0x6218e9bf
++0,      45056,      45056,     4096,     8192, 0x2b270013
++0,      49152,      49152,     4096,     8192, 0x0b94de59
++0,      53248,      53248,     4096,     8192, 0xc314ffc1
++0,      57344,      57344,     4096,     8192, 0xd174d772
++0,      61440,      61440,     4096,     8192, 0x4766106e
++0,      65536,      65536,     4096,     8192, 0x15ffecae
++0,      69632,      69632,     4096,     8192, 0xbc96edfe
++0,      73728,      73728,     4096,     8192, 0xcf23f80b
++0,      77824,      77824,     4096,     8192, 0x460de1c8
++0,      81920,      81920,     4096,     8192, 0x9ec1ff77
++0,      86016,      86016,     4096,     8192, 0x3b76b8e0
++0,      90112,      90112,     4096,     8192, 0x78e8f2f8
++0,      94208,      94208,     4096,     8192, 0xc598effa
++0,      98304,      98304,     4096,     8192, 0x112bfaf9
++0,     102400,     102400,     4096,     8192, 0xf88bdba8
++0,     106496,     106496,     4096,     8192, 0x71eeef58
++0,     110592,     110592,     4096,     8192, 0x9281fb7b
++0,     114688,     114688,     4096,     8192, 0x5fc94499
++0,     118784,     118784,     4096,     8192, 0x59d0073b
++0,     122880,     122880,     4096,     8192, 0xe4f0c8be
++0,     126976,     126976,     4096,     8192, 0xfc45ed2f
++0,     131072,     131072,     4096,     8192, 0x4d16e4a8
++0,     135168,     135168,     4096,     8192, 0x3895f055
++0,     139264,     139264,     4096,     8192, 0x8f97e7d8
++0,     143360,     143360,     4096,     8192, 0x7dd004be
++0,     147456,     147456,     4096,     8192, 0x753df471
++0,     151552,     151552,     4096,     8192, 0xcfcc2456
++0,     155648,     155648,     4096,     8192, 0xd13c0392
++0,     159744,     159744,     4096,     8192, 0x85abe30f
++0,     163840,     163840,     4096,     8192, 0xd96e578e
++0,     167936,     167936,     4096,     8192, 0xdfb6fa2e
++0,     172032,     172032,     4096,     8192, 0x12a910b5
++0,     176128,     176128,     4096,     8192, 0xa375a5aa
++0,     180224,     180224,     4096,     8192, 0x8f355c0d
++0,     184320,     184320,     4096,     8192, 0x7c664d82
++0,     188416,     188416,     4096,     8192, 0xdddf6e4b
++0,     192512,     192512,     4096,     8192, 0x79c1bd96
++0,     196608,     196608,     4096,     8192, 0xd0a6554c
++0,     200704,     200704,     4096,     8192, 0xdc2cac74
++0,     204800,     204800,     4096,     8192, 0x317a9ba6
++0,     208896,     208896,     4096,     8192, 0x0b7a70d3
++0,     212992,     212992,     4096,     8192, 0x3a495407
++0,     217088,     217088,     4096,     8192, 0x7fd9a772
++0,     221184,     221184,     4096,     8192, 0xfa16f04f
++0,     225280,     225280,     4096,     8192, 0x066f0d78
++0,     229376,     229376,     4096,     8192, 0xfac1cf42
++0,     233472,     233472,     4096,     8192, 0xb10ccb5e
++0,     237568,     237568,     4096,     8192, 0xbd051840
++0,     241664,     241664,     4096,     8192, 0xd086034d
++0,     245760,     245760,     4096,     8192, 0x3d08e25f
++0,     249856,     249856,     4096,     8192, 0xa3349168
++0,     253952,     253952,     4096,     8192, 0x64b7f513
++0,     258048,     258048,     4096,     8192, 0x701524ff
++0,     262144,     262144,     4096,     8192, 0x787ee9f9
++0,     266240,     266240,     4096,     8192, 0x1b45e4f1
++0,     270336,     270336,     4096,     8192, 0xf2a3f704
++0,     274432,     274432,     4096,     8192, 0x4db61553
++0,     278528,     278528,     4096,     8192, 0xb301dac1
++0,     282624,     282624,     4096,     8192, 0x3d05e7f6
++0,     286720,     286720,     4096,     8192, 0x48d2ddb2
++0,     290816,     290816,     4096,     8192, 0xc4fa073c
++0,     294912,     294912,     4096,     8192, 0xf2efe191
++0,     299008,     299008,     4096,     8192, 0xefbff2fa
++0,     303104,     303104,     4096,     8192, 0xbf4df8aa
++0,     307200,     307200,     4096,     8192, 0xa178064b
++0,     311296,     311296,     4096,     8192, 0x7114d44b
++0,     315392,     315392,     4096,     8192, 0x02d0d306
++0,     319488,     319488,     4096,     8192, 0x6c1eff49
++0,     323584,     323584,     4096,     8192, 0xfc32f6f0
++0,     327680,     327680,     4096,     8192, 0xa8eef400
++0,     331776,     331776,     4096,     8192, 0x53a7ee65
++0,     335872,     335872,     4096,     8192, 0x1154fad7
++0,     339968,     339968,     4096,     8192, 0x9144e037
++0,     344064,     344064,     4096,     8192, 0x4803cd91
++0,     348160,     348160,     4096,     8192, 0x949ef462
++0,     352256,     352256,     4096,     8192, 0x0feaf266
++0,     356352,     356352,     4096,     8192, 0x79b9e2af
++0,     360448,     360448,     4096,     8192, 0x0b0ce2b6
++0,     364544,     364544,     4096,     8192, 0xab2fde86
++0,     368640,     368640,     4096,     8192, 0x139e9ff0
++0,     372736,     372736,     4096,     8192, 0x1b9eef72
++0,     376832,     376832,     4096,     8192, 0x697d0471
++0,     380928,     380928,     4096,     8192, 0x54910420
++0,     385024,     385024,     4096,     8192, 0xc32de211
++0,     389120,     389120,     4096,     8192, 0x03e1ff1d
++0,     393216,     393216,     4096,     8192, 0x4f4eff15
++0,     397312,     397312,     4096,     8192, 0x9d9e0353
++0,     401408,     401408,     4096,     8192, 0xffc976a7
++0,     405504,     405504,     4096,     8192, 0x29ccf258
++0,     409600,     409600,     4096,     8192, 0xe94edd68
++0,     413696,     413696,     4096,     8192, 0x35b5ddba
++0,     417792,     417792,     4096,     8192, 0xa531dfd9
++0,     421888,     421888,     4096,     8192, 0x79b9e2af
++0,     425984,     425984,     4096,     8192, 0x0b0ce2b6
++0,     430080,     430080,     4096,     8192, 0xab2fde86
++0,     434176,     434176,     4096,     8192, 0x139e9ff0
++0,     438272,     438272,     4096,     8192, 0x1b9eef72
++0,     442368,     442368,     4096,     8192, 0x697d0471
++0,     446464,     446464,     4096,     8192, 0x54910420
++0,     450560,     450560,     4096,     8192, 0xc32de211
++0,     454656,     454656,     4096,     8192, 0x03e1ff1d
++0,     458752,     458752,     4096,     8192, 0x4f4eff15
++0,     462848,     462848,     4096,     8192, 0x9d9e0353
++0,     466944,     466944,     4096,     8192, 0xffc976a7
++0,     471040,     471040,     4096,     8192, 0x29ccf258
++0,     475136,     475136,     4096,     8192, 0xe94edd68
++0,     479232,     479232,     4096,     8192, 0x35b5ddba
++0,     483328,     483328,     4096,     8192, 0xa531dfd9
++0,     487424,     487424,     4096,     8192, 0x79b9e2af
++0,     491520,     491520,     4096,     8192, 0x0b0ce2b6
++0,     495616,     495616,     4096,     8192, 0xab2fde86
++0,     499712,     499712,     4096,     8192, 0x139e9ff0
++0,     503808,     503808,     4096,     8192, 0x1b9eef72
++0,     507904,     507904,     4096,     8192, 0x697d0471
++0,     512000,     512000,     4096,     8192, 0x54910420
++0,     516096,     516096,     4096,     8192, 0xc32de211
++0,     520192,     520192,     4096,     8192, 0x03e1ff1d
++0,     524288,     524288,     4096,     8192, 0x4f4eff15
++0,     528384,     528384,      839,     1678, 0xf276531e
++[STREAM]
++codec_name=dsd_lsbf_planar
++sample_rate=352800
++channels=2
++channel_layout=stereo
++duration=1.509354
++[/STREAM]
++[FORMAT]
++TAG:title=dsftest
++[/FORMAT]
+diff --git a/tests/ref/fate/source b/tests/ref/fate/source
+index 614f6f7..8f120bd 100644
+--- a/tests/ref/fate/source
++++ b/tests/ref/fate/source
+@@ -14,6 +14,7 @@ libavformat/file_open.c
+ libavformat/golomb_tab.c
+ libavformat/log2_tab.c
+ libavformat/rangecoder_dec.c
++libavformat/reverse.c
+ libavformat/riscv/cpu_common.c
+ libswresample/log2_tab.c
+ libswresample/reverse.c
+-- 
+2.56.1
+

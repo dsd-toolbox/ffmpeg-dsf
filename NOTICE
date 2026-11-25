@@ -1,0 +1,17 @@
+ffmpeg-dsf — DSD Toolbox, https://github.com/dsd-toolbox/ffmpeg-dsf
+Copyright 2026 The ffmpeg-dsf authors
+
+The patches in patches/ are licensed LGPL-2.1-or-later. The other code is licensed
+under MIT OR Apache-2.0 (LICENSE-MIT, LICENSE-APACHE). The documentation and icons are
+licensed under CC BY 4.0 (LICENSES/CC-BY-4.0.txt); README.md, section "Licence and
+credits", lists what that covers.
+
+The patches in patches/ modify and extend FFmpeg (https://ffmpeg.org) and contain
+FFmpeg context lines; FFmpeg is Copyright (c) the FFmpeg developers and licensed
+LGPL-2.1-or-later, and the patches are licensed the same way. No other file in this
+repository contains FFmpeg code.
+
+The encoder calls the dsd-upsample C library (https://github.com/dsd-toolbox/dsd-upsample-rs,
+MIT OR Apache-2.0), an external library that is not included.
+
+PROVENANCE.md has the details.

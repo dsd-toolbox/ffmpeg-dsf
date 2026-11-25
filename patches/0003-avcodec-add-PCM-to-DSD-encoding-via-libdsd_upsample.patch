@@ -1,0 +1,474 @@
+From 7bc9f988e85b90c58e1adc5211f2fab92acf19a1 Mon Sep 17 00:00:00 2001
+From: aclater <105859+aclater@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 09:35:35 +0100
+Subject: [PATCH 3/3] avcodec: add PCM to DSD encoding via libdsd_upsample
+
+libdsd_upsample converts PCM at 44.1, 88.2, 176.4 or 352.8 kHz, or at 48,
+96, 192 or 384 kHz (resampled by 147/160 to the 44.1 kHz family first), to
+DSD64, DSD128 or DSD256 with a delta-sigma modulator. The encoder takes
+double-precision planar PCM and outputs dsd_msbf_planar packets.
+
+As for the other DSD codecs, the sample rate of the output is the DSD bit
+rate divided by 8. Since that differs from the PCM input rate, the encoder
+sets avctx->sample_rate to the DSD rate in init; packet timestamps stay in
+the time base chosen by the caller.
+
+Signed-off-by: aclater <105859+aclater@users.noreply.github.com>
+---
+ Changelog                   |   1 +
+ configure                   |   4 +
+ doc/encoders.texi           |  48 +++++++
+ doc/general_contents.texi   |  11 +-
+ libavcodec/Makefile         |   1 +
+ libavcodec/allcodecs.c      |   1 +
+ libavcodec/libdsdupsample.c | 264 ++++++++++++++++++++++++++++++++++++
+ libavcodec/version.h        |   2 +-
+ 8 files changed, 330 insertions(+), 2 deletions(-)
+ create mode 100644 libavcodec/libdsdupsample.c
+
+diff --git a/Changelog b/Changelog
+index dead2f1..c28d827 100644
+--- a/Changelog
++++ b/Changelog
+@@ -10,6 +10,7 @@ version <next>:
+ - Super Audio CD (SACD) demuxer
+ - DSS variable rate SP (format 1) support
+ - DSF muxer
++- PCM to DSD encoding via libdsd_upsample
+ 
+ version 9.1:
+ - ASTC image encoding and decoding via libastcenc, with .astc and KTX 1.0 muxers and demuxers
+diff --git a/configure b/configure
+index 5f1bceb..8ca9e81 100755
+--- a/configure
++++ b/configure
+@@ -230,6 +230,7 @@ External library support:
+   --enable-libdavs2        enable AVS2 decoding via libdavs2 [no]
+   --enable-libdc1394       enable IIDC-1394 grabbing using libdc1394
+                            and libraw1394 [no]
++  --enable-libdsdupsample  enable PCM to DSD encoding via libdsd_upsample [no]
+   --enable-libdvdnav       enable libdvdnav, needed for DVD demuxing [no]
+   --enable-libdvdread      enable libdvdread, needed for DVD demuxing [no]
+   --enable-libfdk-aac      enable AAC de/encoding via libfdk-aac [no]
+@@ -2074,6 +2075,7 @@ EXTERNAL_LIBRARY_LIST="
+     libcodec2
+     libdav1d
+     libdc1394
++    libdsdupsample
+     libflite
+     libfontconfig
+     libfreetype
+@@ -3819,6 +3821,7 @@ libdav1d_decoder_deps="libdav1d"
+ libdav1d_decoder_select="itut_t35"
+ libdavs2_decoder_deps="libdavs2"
+ libdavs2_decoder_select="avs2_parser"
++libdsdupsample_encoder_deps="libdsdupsample"
+ libfdk_aac_decoder_deps="libfdk_aac"
+ libfdk_aac_encoder_deps="libfdk_aac"
+ libfdk_aac_encoder_select="audio_frame_queue"
+@@ -7306,6 +7309,7 @@ enabled libdav1d          && require_pkg_config libdav1d "dav1d >= 1.0.0" "dav1d
+ enabled libdavs2          && require_pkg_config libdavs2 "davs2 >= 1.6.0" davs2.h davs2_decoder_open
+ enabled libdc1394         && require_pkg_config libdc1394 libdc1394-2 dc1394/dc1394.h dc1394_new
+ enabled libdrm            && check_pkg_config libdrm libdrm xf86drm.h drmGetVersion
++enabled libdsdupsample    && require_pkg_config libdsdupsample "dsd_upsample >= 0.1.0" dsd_upsample.h dsdup_stream_new
+ enabled libdvdnav         && require_pkg_config libdvdnav "dvdnav >= 6.1.0" dvdnav/dvdnav.h dvdnav_open2
+ enabled libdvdread        && require_pkg_config libdvdread "dvdread >= 6.1.1" dvdread/dvd_reader.h DVDOpen2
+ enabled libfdk_aac        && { check_pkg_config libfdk_aac fdk-aac "fdk-aac/aacenc_lib.h" aacEncOpen ||
+diff --git a/doc/encoders.texi b/doc/encoders.texi
+index cf3861d..7999bfd 100644
+--- a/doc/encoders.texi
++++ b/doc/encoders.texi
+@@ -642,6 +642,54 @@ Sets the maximum delay in milliseconds. Lower delays than 20ms will very quickly
+ decrease quality.
+ @end table
+ 
++@anchor{libdsdupsample}
++@section libdsdupsample
++
++PCM to DSD (Direct Stream Digital) encoder wrapper using libdsd_upsample.
++
++The input is double-precision planar PCM at 44.1, 88.2, 176.4 or 352.8 kHz,
++or at 48, 96, 192 or 384 kHz, with 1 to 6 channels. The library resamples
++48 kHz-family input by 147/160 to the 44.1 kHz family first. The output is
++planar DSD, most significant bit first (@samp{dsd_msbf_planar}). As for the
++other DSD codecs in FFmpeg, the sample rate of the output stream is the DSD
++bit rate divided by 8.
++
++Requires the presence of the libdsd_upsample headers and library during
++configuration. You need to explicitly configure the build with
++@code{--enable-libdsdupsample}.
++
++@subsection Options
++
++@table @option
++@item dsd_rate
++Set the output rate as a multiple of 44.1 kHz. Possible values:
++@table @samp
++@item dsd64
++2.8224 MHz
++@item dsd128
++5.6448 MHz (default)
++@item dsd256
++11.2896 MHz
++@end table
++
++@item order
++Set the order of the modulator, from 5 to 8 (5 to 7 at DSD128). The default,
++@samp{auto} (-1), uses the library's default for the output rate.
++
++@item gain
++Set the gain in dB applied before the modulator, from -120 to 24.
++By default the library's default gain for DSD output is used.
++
++@item dither
++Add TPDF dither before the modulator. Default is disabled.
++@end table
++
++@subsection Examples
++Convert a WAV file to a DSD128 DSF file:
++@example
++ffmpeg -i input.wav -c:a libdsdupsample -dsd_rate dsd128 output.dsf
++@end example
++
+ @anchor{libfdk-aac-enc}
+ @section libfdk_aac
+ 
+diff --git a/doc/general_contents.texi b/doc/general_contents.texi
+index ccd7c6d..0700dd4 100644
+--- a/doc/general_contents.texi
++++ b/doc/general_contents.texi
+@@ -162,6 +162,15 @@ libdavs2 is under the GNU Public License Version 2 or later
+ details), you must upgrade FFmpeg's license to GPL in order to use it.
+ @end float
+ 
++@section libdsd_upsample
++
++FFmpeg can make use of the libdsd_upsample library to encode PCM audio to
++DSD64, DSD128 or DSD256.
++
++Go to @url{https://github.com/dsd-toolbox/dsd-upsample-rs} and follow the instructions for
++installing the library. Then pass @code{--enable-libdsdupsample} to configure
++to enable it.
++
+ @section uavs3d
+ 
+ FFmpeg can make use of the uavs3d library for AVS3-P2/IEEE1857.10 video decoding.
+@@ -1428,7 +1437,7 @@ following image formats are supported:
+ @item DSD (Direct Stream Digital), least significant bit first  @tab  @tab  X
+ @item DSD (Direct Stream Digital), most significant bit first   @tab  X  @tab  X
+ @item DSD (Direct Stream Digital), least significant bit first, planar  @tab  @tab  X
+-@item DSD (Direct Stream Digital), most significant bit first, planar   @tab  @tab  X
++@item DSD (Direct Stream Digital), most significant bit first, planar   @tab  E  @tab  X
+ @item DSP Group TrueSpeech   @tab     @tab  X
+ @item DST (Direct Stream Transfer) @tab  @tab  X
+ @item DV audio               @tab     @tab  X
+diff --git a/libavcodec/Makefile b/libavcodec/Makefile
+index f12ad9c..a907a35 100644
+--- a/libavcodec/Makefile
++++ b/libavcodec/Makefile
+@@ -1194,6 +1194,7 @@ OBJS-$(CONFIG_LIBCODEC2_DECODER)          += libcodec2.o
+ OBJS-$(CONFIG_LIBCODEC2_ENCODER)          += libcodec2.o
+ OBJS-$(CONFIG_LIBDAV1D_DECODER)           += libdav1d.o av1_parse.o
+ OBJS-$(CONFIG_LIBDAVS2_DECODER)           += libdavs2.o
++OBJS-$(CONFIG_LIBDSDUPSAMPLE_ENCODER)     += libdsdupsample.o
+ OBJS-$(CONFIG_LIBFDK_AAC_DECODER)         += libfdk-aacdec.o
+ OBJS-$(CONFIG_LIBFDK_AAC_ENCODER)         += libfdk-aacenc.o
+ OBJS-$(CONFIG_LIBFDK_XHE_AAC_ENCODER)     += libfdk-xhe-aacenc.o
+diff --git a/libavcodec/allcodecs.c b/libavcodec/allcodecs.c
+index edbe44e..75a5e2e 100644
+--- a/libavcodec/allcodecs.c
++++ b/libavcodec/allcodecs.c
+@@ -785,6 +785,7 @@ extern const FFCodec ff_libcodec2_encoder;
+ extern const FFCodec ff_libcodec2_decoder;
+ extern const FFCodec ff_libdav1d_decoder;
+ extern const FFCodec ff_libdavs2_decoder;
++extern const FFCodec ff_libdsdupsample_encoder;
+ extern const FFCodec ff_libfdk_aac_encoder;
+ extern const FFCodec ff_libfdk_aac_decoder;
+ extern const FFCodec ff_libfdk_xhe_aac_encoder;
+diff --git a/libavcodec/libdsdupsample.c b/libavcodec/libdsdupsample.c
+new file mode 100644
+index 0000000..54ea7c5
+--- /dev/null
++++ b/libavcodec/libdsdupsample.c
+@@ -0,0 +1,264 @@
++/*
++ * PCM to DSD encoding via libdsd_upsample
++ *
++ * This file is part of FFmpeg.
++ *
++ * FFmpeg is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * FFmpeg is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with FFmpeg; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
++ */
++
++/**
++ * @file
++ * PCM to DSD encoder using libdsd_upsample.
++ *
++ * The input is double-precision planar PCM at 44.1, 88.2, 176.4 or
++ * 352.8 kHz, or at 48, 96, 192 or 384 kHz, which the library resamples by
++ * 147/160 to the 44.1 kHz family first; the output is DSD64, DSD128 or
++ * DSD256, most significant bit first, one plane per channel in each packet.
++ * As for the other DSD codecs, the sample rate of the output is the DSD bit
++ * rate divided by 8 (one byte per sample); the encoder sets it during init.
++ */
++
++#include <math.h>
++
++#include <dsd_upsample.h>
++
++#include "libavutil/channel_layout.h"
++#include "libavutil/mem.h"
++#include "libavutil/opt.h"
++
++#include "avcodec.h"
++#include "codec_internal.h"
++#include "encode.h"
++
++typedef struct LibDSDUpsampleContext {
++    const AVClass *class;
++    int rate;
++    int order;
++    double gain;
++    int dither;
++
++    dsdup_stream *stream;
++    int channels;
++    uint8_t *buf[DSDUP_MAX_CHANNELS];   ///< output not yet packetized
++    unsigned buf_alloc[DSDUP_MAX_CHANNELS];
++    size_t buf_size;                    ///< bytes in each of buf[]
++    int64_t first_pts;
++    int64_t out_samples;                ///< output samples packetized so far
++    int err;                            ///< error from the output callback
++    int flushed;
++} LibDSDUpsampleContext;
++
++static int dsdup_error(AVCodecContext *avctx, int32_t status)
++{
++    av_log(avctx, AV_LOG_ERROR, "libdsd_upsample: %s\n", dsdup_last_error());
++
++    switch (status) {
++    case DSDUP_ERR_INVALID_ARGUMENT:
++    case DSDUP_ERR_UNSUPPORTED:      return AVERROR(EINVAL);
++    default:                         return AVERROR_EXTERNAL;
++    }
++}
++
++static int32_t output_cb(void *user, const uint8_t *const *channels,
++                         uint32_t nb_channels, size_t bytes)
++{
++    AVCodecContext *avctx = user;
++    LibDSDUpsampleContext *s = avctx->priv_data;
++
++    if (nb_channels != s->channels ||
++        bytes > INT_MAX / s->channels - s->buf_size) {
++        s->err = AVERROR(ERANGE);
++        return 1;
++    }
++
++    for (int ch = 0; ch < s->channels; ch++) {
++        uint8_t *buf = av_fast_realloc(s->buf[ch], &s->buf_alloc[ch],
++                                       s->buf_size + bytes);
++        if (!buf) {
++            s->err = AVERROR(ENOMEM);
++            return 1;
++        }
++        s->buf[ch] = buf;
++        memcpy(buf + s->buf_size, channels[ch], bytes);
++    }
++    s->buf_size += bytes;
++
++    return 0;
++}
++
++static av_cold int libdsdupsample_init(AVCodecContext *avctx)
++{
++    LibDSDUpsampleContext *s = avctx->priv_data;
++    dsdup_settings settings;
++    int32_t status;
++
++    s->channels  = avctx->ch_layout.nb_channels;
++    s->first_pts = AV_NOPTS_VALUE;
++
++    if (s->channels < 1 || s->channels > DSDUP_MAX_CHANNELS) {
++        av_log(avctx, AV_LOG_ERROR, "1 to %d channels are supported\n",
++               DSDUP_MAX_CHANNELS);
++        return AVERROR(EINVAL);
++    }
++
++    if (avctx->time_base.num <= 0 || avctx->time_base.den <= 0) {
++        av_log(avctx, AV_LOG_ERROR, "Invalid time base %d/%d\n",
++               avctx->time_base.num, avctx->time_base.den);
++        return AVERROR(EINVAL);
++    }
++    if (s->rate != 64 && s->rate != 128 && s->rate != 256) {
++        av_log(avctx, AV_LOG_ERROR, "dsd_rate must be 64, 128 or 256, not %d\n",
++               s->rate);
++        return AVERROR(EINVAL);
++    }
++    if (s->order != -1 && (s->order < 5 || s->order > 8)) {
++        av_log(avctx, AV_LOG_ERROR, "order must be auto (-1) or 5 to 8, not %d\n",
++               s->order);
++        return AVERROR(EINVAL);
++    }
++    if (s->rate == 128 && s->order == 8) {
++        /* as the library: order 8 in the audio band is unstable at DSD128 */
++        av_log(avctx, AV_LOG_ERROR,
++               "modulator order 8: DSD128 output accepts 5, 6, 7\n");
++        return AVERROR(EINVAL);
++    }
++
++    status = dsdup_settings_init(&settings, s->rate);
++    if (status != DSDUP_OK)
++        return dsdup_error(avctx, status);
++    if (s->order >= 0)
++        settings.order = s->order;
++    if (!isnan(s->gain))
++        settings.gain_db = s->gain; /* else the library's default */
++    settings.dither  = s->dither;
++
++    status = dsdup_stream_new(&settings, DSDUP_IN_PCM, avctx->sample_rate,
++                              s->channels, output_cb, avctx, &s->stream);
++    if (status != DSDUP_OK)
++        return dsdup_error(avctx, status);
++
++    /* the output is DSD at 44100 * rate bits per second, one byte per sample */
++    avctx->sample_rate           = 44100 * s->rate / 8;
++    avctx->bits_per_coded_sample = 8;
++    avctx->block_align           = s->channels;
++    avctx->bit_rate              = 8LL * s->channels * avctx->sample_rate;
++
++    av_log(avctx, AV_LOG_VERBOSE, "libdsd_upsample %s, DSD%d\n",
++           dsdup_version(), s->rate);
++
++    return 0;
++}
++
++static int libdsdupsample_encode(AVCodecContext *avctx, AVPacket *pkt,
++                                 const AVFrame *frame, int *got_packet_ptr)
++{
++    LibDSDUpsampleContext *s = avctx->priv_data;
++    int32_t status = DSDUP_OK;
++    int64_t pts;
++    int ret;
++
++    if (frame) {
++        if (frame->ch_layout.nb_channels != s->channels)
++            return AVERROR(EINVAL);
++        if (s->first_pts == AV_NOPTS_VALUE)
++            s->first_pts = frame->pts != AV_NOPTS_VALUE ? frame->pts : 0;
++        status = dsdup_stream_push_pcm(s->stream,
++                                       (const double *const *)frame->extended_data,
++                                       frame->nb_samples);
++    } else if (!s->flushed) {
++        s->flushed = 1;
++        status = dsdup_stream_finish(s->stream, NULL);
++    }
++    if (s->err < 0)
++        return s->err;
++    if (status != DSDUP_OK)
++        return dsdup_error(avctx, status);
++
++    if (!s->buf_size)
++        return 0;
++
++    ret = ff_get_encode_buffer(avctx, pkt, s->buf_size * s->channels, 0);
++    if (ret < 0)
++        return ret;
++    for (int ch = 0; ch < s->channels; ch++)
++        memcpy(pkt->data + ch * s->buf_size, s->buf[ch], s->buf_size);
++
++    pts = av_rescale_q(s->out_samples, (AVRational){ 1, avctx->sample_rate },
++                       avctx->time_base);
++    s->out_samples += s->buf_size;
++    pkt->pts = pkt->dts = s->first_pts + pts;
++    pkt->duration = av_rescale_q(s->out_samples,
++                                 (AVRational){ 1, avctx->sample_rate },
++                                 avctx->time_base) - pts;
++    s->buf_size = 0;
++
++    *got_packet_ptr = 1;
++    return 0;
++}
++
++static av_cold int libdsdupsample_close(AVCodecContext *avctx)
++{
++    LibDSDUpsampleContext *s = avctx->priv_data;
++
++    dsdup_stream_free(s->stream);
++    s->stream = NULL;
++    for (int ch = 0; ch < DSDUP_MAX_CHANNELS; ch++)
++        av_freep(&s->buf[ch]);
++
++    return 0;
++}
++
++#define OFFSET(x) offsetof(LibDSDUpsampleContext, x)
++#define AE AV_OPT_FLAG_AUDIO_PARAM | AV_OPT_FLAG_ENCODING_PARAM
++static const AVOption options[] = {
++    { "dsd_rate", "Output DSD rate, as a multiple of 44.1 kHz", OFFSET(rate),
++      AV_OPT_TYPE_INT, { .i64 = 128 }, 64, 256, AE, .unit = "dsd_rate" },
++        { "dsd64",  "2.8224 MHz",  0, AV_OPT_TYPE_CONST, { .i64 = 64  }, 0, 0, AE, .unit = "dsd_rate" },
++        { "dsd128", "5.6448 MHz",  0, AV_OPT_TYPE_CONST, { .i64 = 128 }, 0, 0, AE, .unit = "dsd_rate" },
++        { "dsd256", "11.2896 MHz", 0, AV_OPT_TYPE_CONST, { .i64 = 256 }, 0, 0, AE, .unit = "dsd_rate" },
++    { "order", "Modulator order, 5 to 8", OFFSET(order),
++      AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 8, AE, .unit = "order" },
++        { "auto", "Library default for the output rate", 0, AV_OPT_TYPE_CONST, { .i64 = -1 }, 0, 0, AE, .unit = "order" },
++    { "gain", "Gain in dB applied before the modulator (default: the library's)", OFFSET(gain),
++      AV_OPT_TYPE_DOUBLE, { .dbl = NAN }, -120.0, 24.0, AE },
++    { "dither", "Add TPDF dither before the modulator", OFFSET(dither),
++      AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, AE },
++    { NULL },
++};
++
++static const AVClass libdsdupsample_class = {
++    .class_name = "libdsdupsample",
++    .item_name  = av_default_item_name,
++    .option     = options,
++    .version    = LIBAVUTIL_VERSION_INT,
++};
++
++const FFCodec ff_libdsdupsample_encoder = {
++    .p.name         = "libdsdupsample",
++    CODEC_LONG_NAME("libdsd_upsample DSD (Direct Stream Digital)"),
++    .p.type         = AVMEDIA_TYPE_AUDIO,
++    .p.id           = AV_CODEC_ID_DSD_MSBF_PLANAR,
++    .p.capabilities = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_DELAY |
++                      AV_CODEC_CAP_VARIABLE_FRAME_SIZE,
++    .p.priv_class   = &libdsdupsample_class,
++    .p.wrapper_name = "libdsdupsample",
++    .priv_data_size = sizeof(LibDSDUpsampleContext),
++    .init           = libdsdupsample_init,
++    FF_CODEC_ENCODE_CB(libdsdupsample_encode),
++    .close          = libdsdupsample_close,
++    CODEC_SAMPLEFMTS(AV_SAMPLE_FMT_DBLP),
++    CODEC_SAMPLERATES(44100, 88200, 176400, 352800,
++                      48000, 96000, 192000, 384000),
++};
+diff --git a/libavcodec/version.h b/libavcodec/version.h
+index 87b7284..5183deb 100644
+--- a/libavcodec/version.h
++++ b/libavcodec/version.h
+@@ -29,7 +29,7 @@
+ 
+ #include "version_major.h"
+ 
+-#define LIBAVCODEC_VERSION_MINOR  28
++#define LIBAVCODEC_VERSION_MINOR  29
+ #define LIBAVCODEC_VERSION_MICRO 100
+ 
+ #define LIBAVCODEC_VERSION_INT  AV_VERSION_INT(LIBAVCODEC_VERSION_MAJOR, \
+-- 
+2.56.1
+

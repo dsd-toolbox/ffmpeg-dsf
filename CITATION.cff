@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use ffmpeg-dsf in your work, please cite it as below."
+title: "ffmpeg-dsf"
+type: software
+authors:
+  - name: "The ffmpeg-dsf authors"
+repository-code: "https://github.com/dsd-toolbox/ffmpeg-dsf"
+url: "https://github.com/dsd-toolbox/ffmpeg-dsf"
+abstract: "Patches for FFmpeg that fix the channel layout of DSF channel type 5, add a DSF muxer, and add the libdsdupsample encoder (PCM to DSD64, DSD128 or DSD256 through the dsd-upsample C library). The encoder's DSF output is byte-identical to the dsd-upsample command-line tool of the same library release, except for two documented header fields."
+# The patches (patches/) are LGPL-2.1-or-later, FFmpeg's licence; the other files are
+# MIT OR Apache-2.0, the documentation CC BY 4.0 (README.md, "Licence and credits"). Zenodo
+# reads `license` as a single SPDX string, so only the patches' licence is given here.
+license: LGPL-2.1-or-later
+version: "0.1.0"
+keywords:
+  - "DSD"
+  - "DSF"
+  - "FFmpeg"
+  - "audio"
+  - "muxer"
+  - "encoder"
